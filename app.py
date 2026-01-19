@@ -1,95 +1,121 @@
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
 
-# --- Page Configuration ---
-st.set_page_config(page_title="CESPDC Cavity Simulator", layout="wide")
+# --- Physical Constants & Models ---
+def n_ktp(wavelength_m, axis='z'):
+    """Sellmeier equations for KTP. Ref: Fan et al. (1987)"""
+    wl_um = wavelength_m * 1e6
+    if axis == 'z':
+        n_sq = 2.25411 + (1.06543 * wl_um**2) / (wl_um**2 - 0.05486) + (1.11202 * wl_um**2) / (wl_um**2 - 232.5)
+    elif axis == 'y':
+        n_sq = 2.19229 + (0.83547 * wl_um**2) / (wl_um**2 - 0.04963) + (0.39636 * wl_um**2) / (wl_um**2 - 187.0)
+    return np.sqrt(n_sq)
 
-st.title("Cavity-Enhanced SPDC Spectral Simulator")
+def get_vg(wavelength_m, axis='z'):
+    c = 299792458.0
+    eps = 1e-10
+    n = n_ktp(wavelength_m, axis)
+    dn_dl = (n_ktp(wavelength_m + eps, axis) - n_ktp(wavelength_m - eps, axis)) / (2 * eps)
+    ng = n - wavelength_m * dn_dl
+    return c / ng
+
+# --- Streamlit UI Setup ---
+st.set_page_config(page_title="Type-II CE-SPDC Simulator", layout="wide")
+st.title("Cavity-Enhanced SPDC (Type-II PPKTP)")
 st.markdown("""
-This app simulates the **Power Spectral Density** of a doubly-resonant Cavity-Enhanced Spontaneous Parametric Down-Conversion (CESPDC) source, 
-following the NIST model (Eq. 8).
+This app simulates the spectral output of a doubly-resonant Type-II SPDC source. 
+The **Signal (Y-pol)** and **Idler (Z-pol)** photons experience different refractive indices, 
+creating a Vernier "Cluster" effect.
 """)
 
 # --- Sidebar Controls ---
-st.sidebar.header("Cavity Parameters")
-l_cav_cm = st.sidebar.slider("Cavity Length (cm)", 5.0, 20.0, 10.0)
-l_cry_cm = st.sidebar.slider("Crystal Length (cm)", 0.5, 5.0, 1.0)
-finesse = st.sidebar.number_input("Cavity Finesse", value=100)
+st.sidebar.header("System Parameters")
+L_cav_cm = st.sidebar.slider("Cavity Length (cm)", 5.0, 15.0, 10.0, step=0.01)
+L_cry_cm = st.sidebar.slider("Crystal Length (cm)", 0.5, 2.0, 1.0, step=0.1)
+finesse = st.sidebar.slider("Cavity Finesse", 10, 500, 100)
 
-st.sidebar.header("Material Properties (PPKTP)")
-n_s = st.sidebar.number_input("Index (Signal)", value=1.834, format="%.4f")
-n_i = st.sidebar.number_input("Index (Idler)", value=1.831, format="%.4f")
+st.sidebar.header("Fine Tuning")
+# High precision wavelength shift to align clusters
+lambda_base = 852.354 # nm
+lambda_off = st.sidebar.number_input("Wavelength Offset (nm)", value=0.0021, format="%.5f")
+lambda0 = (lambda_base + lambda_off) * 1e-9
 
-st.sidebar.header("Pump Properties")
-lambda_p_nm = st.sidebar.number_input("Pump Wavelength (nm)", value=852.354, format="%.3f")
-
-# --- Physical Calculations ---
+# --- Simulation Core ---
 c = 299792458.0
-L_cav = l_cav_cm / 100.0
-L_cry = l_cry_cm / 100.0
+f0 = c / lambda0
+L_cav = L_cav_cm / 100
+L_cry = L_cry_cm / 100
 L_air = L_cav - L_cry
-lambda_p = lambda_p_nm * 1e-9
-f_p = c / lambda_p
-f_s0 = f_p / 2
 
-# Optical Path Lengths and FSRs
-L_opt_s = L_air + (n_s * L_cry)
-L_opt_i = L_air + (n_i * L_cry)
-fsr_s = c / (2 * L_opt_s)
-fsr_i = c / (2 * L_opt_i)
-
-# Calculate physical mode offsets
-m_s_center = int(np.round(f_s0 / fsr_s))
-m_i_center = int(np.round(f_s0 / fsr_i))
+# Physical Bandwidth
+vg_s = get_vg(lambda0, 'y')
+vg_i = get_vg(lambda0, 'z')
+vg_p = get_vg(lambda0/2, 'z')
+gvm = 0.5 * (1/vg_s + 1/vg_i) - 1/vg_p
 
 def get_spectrum(f_detuning):
-    # Phase Matching (Free Space)
-    tau_o = (L_cry / c) * (n_i - n_s)
-    sinc_sq = np.sinc(f_detuning * tau_o)**2
+    fs = f0 + f_detuning
+    fi = f0 - f_detuning
     
-    # Cavity Response (Airy Functions)
-    def airy(f_abs, fsr):
-        phi = 2 * np.pi * f_abs / fsr
+    # 1. Sinc Envelope
+    arg = L_cry * gvm * f_detuning
+    sinc_sq = np.sinc(arg)**2
+
+    # 2. Cavity Airy Functions
+    def airy(f, axis):
+        n = n_ktp(c / f, axis=axis)
+        L_opt = L_air + (n * L_cry)
+        phi = (2 * np.pi * f / c) * (2 * L_opt)
         coeff = (2 * finesse / np.pi)**2
-        return 1 / (1 + coeff * np.sin(phi/2)**2)
-    
-    airy_s = airy(f_s0 + f_detuning, fsr_s)
-    airy_i = airy(f_s0 - f_detuning, fsr_i)
-    return sinc_sq * airy_s * airy_i, sinc_sq
+        return 1 / (1 + coeff * np.sin(phi / 2)**2)
 
-# --- Data Generation ---
-col1, col2 = st.columns(2)
+    val = sinc_sq * airy(fs, 'y') * airy(fi, 'z')
+    return val, sinc_sq
 
-with col1:
-    st.subheader("Macro View: Clusters & Phase Matching")
-    f_wide = np.linspace(-12e12, 12e12, 2000)
-    p_wide, sinc_wide = get_spectrum(f_wide)
-    
-    fig1, ax1 = plt.subplots()
-    ax1.plot(f_wide / 1e12, sinc_wide, 'r--', alpha=0.5, label='Sinc Envelope')
-    ax1.fill_between(f_wide / 1e12, p_wide, color='midnightblue', alpha=0.7, label='Clusters')
-    ax1.set_xlabel("Detuning (THz)")
-    ax1.set_ylabel("Intensity")
-    ax1.legend()
-    st.pyplot(fig1)
+# --- Plotting ---
+col1, col2 = st.columns([1, 1])
 
-with col2:
-    st.subheader("Micro View: Longitudinal Modes")
-    f_zoom = np.linspace(-5e9, 5e9, 5000)
-    p_zoom, _ = get_spectrum(f_zoom)
-    
-    fig2, ax2 = plt.subplots()
-    ax2.plot(f_zoom / 1e9, p_zoom, color='blue')
-    ax2.set_xlabel("Detuning (GHz)")
-    ax2.set_ylabel("Intensity")
-    st.pyplot(fig2)
+# Data Generation
+f_wide = np.linspace(-400e9, 400e9, 200000)
+p_wide, sinc_wide = get_spectrum(f_wide)
 
-# --- Display Diagnostics ---
-st.divider()
-st.subheader("Calculated Values")
-d1, d2, d3, d4 = st.columns(4)
-d1.metric("FSR Signal", f"{fsr_s/1e6:.2f} MHz")
-d2.metric("FSR Idler", f"{fsr_i/1e6:.2f} MHz")
-d3.metric("Cluster Spacing", f"{(fsr_s*fsr_i)/abs(fsr_s-fsr_i)/1e12:.2f} THz")
-d4.metric("Linewidth", f"{fsr_s/finesse/1e6:.2f} MHz")
+# Cluster Identification
+peaks, _ = find_peaks(p_wide, distance=2000, height=0.005)
+cluster_freqs = f_wide[peaks]
+
+if len(cluster_freqs) > 0:
+    f_center_cluster = cluster_freqs[np.argmin(np.abs(cluster_freqs))]
+else:
+    f_center_cluster = 0
+
+# Micro Data
+fsr_y = c / (2 * (L_air + n_ktp(lambda0, 'y') * L_cry))
+micro_span = 10 * fsr_y
+f_micro_det = np.linspace(f_center_cluster - micro_span, f_center_cluster + micro_span, 10000)
+p_micro, sinc_micro = get_spectrum(f_micro_det)
+
+# --- Macro Plot ---
+fig1, ax1 = plt.subplots(figsize=(10, 5))
+ax1.plot(f_wide / 1e9, sinc_wide, 'r--', alpha=0.4, label='Crystal Envelope')
+ax1.plot(f_wide / 1e9, p_wide, color='midnightblue', lw=0.7, label='CE-SPDC Clusters')
+for f_c in cluster_freqs:
+    ax1.axvline(f_c / 1e9, color='blue', linestyle=':', alpha=0.2)
+ax1.set_title("Macroscopic View: Phase Matching & Clusters")
+ax1.set_xlabel("Detuning (GHz)")
+ax1.set_ylabel("Intensity")
+ax1.legend()
+st.pyplot(fig1)
+
+# --- Micro Plot ---
+fig2, ax2 = plt.subplots(figsize=(10, 5))
+ax2.plot((f_micro_det - f_center_cluster) / 1e6, p_micro, color='darkgreen', lw=1.5, label='Modes')
+ax2.plot((f_micro_det - f_center_cluster) / 1e6, sinc_micro, 'r--', alpha=0.3)
+ax2.set_title(f"Microscopic View: Centered on Cluster at {f_center_cluster/1e9:.2f} GHz")
+ax2.set_xlabel("Offset from Cluster Center (MHz)")
+ax2.set_ylabel("Intensity")
+st.pyplot(fig2)
+
+# --- Info Display ---
+st.info(f"**Calculated FSR (Signal):** {fsr_y/1e6:.2f} MHz | **Cluster Spacing:** ~{abs(fsr_y**2/(fsr_y - (c/(2*(L_air + n_ktp(lambda0, 'z')*L_cry)))))/1e9:.1f} GHz")
