@@ -7,6 +7,8 @@ from scipy.signal import find_peaks
 def n_ktp(wavelength_m, axis='z'):
     """Sellmeier equations for KTP. Ref: Fan et al. (1987)"""
     wl_um = wavelength_m * 1e6
+    # Clipping to avoid numerical instability outside transparency range
+    wl_um = np.clip(wl_um, 0.35, 4.0)
     if axis == 'z':
         n_sq = 2.25411 + (1.06543 * wl_um**2) / (wl_um**2 - 0.05486) + (1.11202 * wl_um**2) / (wl_um**2 - 232.5)
     elif axis == 'y':
@@ -24,11 +26,6 @@ def get_vg(wavelength_m, axis='z'):
 # --- Streamlit UI Setup ---
 st.set_page_config(page_title="Type-II CE-SPDC Simulator", layout="wide")
 st.title("Cavity-Enhanced SPDC (Type-II PPKTP)")
-st.markdown("""
-This app simulates the spectral output of a doubly-resonant Type-II SPDC source. 
-The **Signal (Y-pol)** and **Idler (Z-pol)** photons experience different refractive indices, 
-creating a Vernier "Cluster" effect.
-""")
 
 # --- Sidebar Controls ---
 st.sidebar.header("System Parameters")
@@ -37,8 +34,7 @@ L_cry_cm = st.sidebar.slider("Crystal Length (cm)", 0.5, 2.0, 1.0, step=0.1)
 finesse = st.sidebar.slider("Cavity Finesse", 10, 500, 100)
 
 st.sidebar.header("Fine Tuning")
-# High precision wavelength shift to align clusters
-lambda_base = 852.354 # nm
+lambda_base = 852.354 
 lambda_off = st.sidebar.number_input("Wavelength Offset (nm)", value=0.0021, format="%.5f")
 lambda0 = (lambda_base + lambda_off) * 1e-9
 
@@ -49,7 +45,19 @@ L_cav = L_cav_cm / 100
 L_cry = L_cry_cm / 100
 L_air = L_cav - L_cry
 
-# Physical Bandwidth
+# Calculate Indices and FSRs for Output
+ny0 = n_ktp(lambda0, 'y')
+nz0 = n_ktp(lambda0, 'z')
+
+# Optical lengths
+L_opt_y = L_air + (ny0 * L_cry)
+L_opt_z = L_air + (nz0 * L_cry)
+
+# Free Spectral Ranges
+fsr_y = c / (2 * L_opt_y)
+fsr_z = c / (2 * L_opt_z)
+
+# Physical Bandwidth (GVM)
 vg_s = get_vg(lambda0, 'y')
 vg_i = get_vg(lambda0, 'z')
 vg_p = get_vg(lambda0/2, 'z')
@@ -75,47 +83,54 @@ def get_spectrum(f_detuning):
     return val, sinc_sq
 
 # --- Plotting ---
-col1, col2 = st.columns([1, 1])
-
-# Data Generation
-f_wide = np.linspace(-400e9, 400e9, 200000)
+# Increase resolution for high-finesse peaks
+f_wide = np.linspace(-400e9, 400e9, 250000)
 p_wide, sinc_wide = get_spectrum(f_wide)
 
-# Cluster Identification
-peaks, _ = find_peaks(p_wide, distance=2000, height=0.005)
+peaks, _ = find_peaks(p_wide, distance=1000, height=0.005)
 cluster_freqs = f_wide[peaks]
+f_center_cluster = cluster_freqs[np.argmin(np.abs(cluster_freqs))] if len(cluster_freqs) > 0 else 0
 
-if len(cluster_freqs) > 0:
-    f_center_cluster = cluster_freqs[np.argmin(np.abs(cluster_freqs))]
-else:
-    f_center_cluster = 0
+col1, col2 = st.columns(2)
 
-# Micro Data
-fsr_y = c / (2 * (L_air + n_ktp(lambda0, 'y') * L_cry))
-micro_span = 10 * fsr_y
-f_micro_det = np.linspace(f_center_cluster - micro_span, f_center_cluster + micro_span, 10000)
-p_micro, sinc_micro = get_spectrum(f_micro_det)
+with col1:
+    fig1, ax1 = plt.subplots(figsize=(10, 5))
+    ax1.plot(f_wide / 1e9, sinc_wide, 'r--', alpha=0.4, label='Crystal Envelope')
+    ax1.plot(f_wide / 1e9, p_wide, color='midnightblue', lw=0.7, label='CE-SPDC Clusters')
+    ax1.set_title("Macroscopic View: Phase Matching & Clusters")
+    ax1.set_xlabel("Detuning (GHz)")
+    ax1.set_ylabel("Intensity")
+    ax1.legend()
+    st.pyplot(fig1)
 
-# --- Macro Plot ---
-fig1, ax1 = plt.subplots(figsize=(10, 5))
-ax1.plot(f_wide / 1e9, sinc_wide, 'r--', alpha=0.4, label='Crystal Envelope')
-ax1.plot(f_wide / 1e9, p_wide, color='midnightblue', lw=0.7, label='CE-SPDC Clusters')
-for f_c in cluster_freqs:
-    ax1.axvline(f_c / 1e9, color='blue', linestyle=':', alpha=0.2)
-ax1.set_title("Macroscopic View: Phase Matching & Clusters")
-ax1.set_xlabel("Detuning (GHz)")
-ax1.set_ylabel("Intensity")
-ax1.legend()
-st.pyplot(fig1)
+with col2:
+    micro_span = 5 * fsr_y
+    f_micro_det = np.linspace(f_center_cluster - micro_span, f_center_cluster + micro_span, 15000)
+    p_micro, sinc_micro = get_spectrum(f_micro_det)
+    
+    fig2, ax2 = plt.subplots(figsize=(10, 5))
+    ax2.plot((f_micro_det - f_center_cluster) / 1e6, p_micro, color='darkgreen', lw=1.5, label='Modes')
+    ax2.set_title(f"Microscopic View: Cluster at {f_center_cluster/1e9:.2f} GHz")
+    ax2.set_xlabel("Offset from Cluster Center (MHz)")
+    ax2.set_ylabel("Intensity")
+    st.pyplot(fig2)
 
-# --- Micro Plot ---
-fig2, ax2 = plt.subplots(figsize=(10, 5))
-ax2.plot((f_micro_det - f_center_cluster) / 1e6, p_micro, color='darkgreen', lw=1.5, label='Modes')
-ax2.plot((f_micro_det - f_center_cluster) / 1e6, sinc_micro, 'r--', alpha=0.3)
-ax2.set_title(f"Microscopic View: Centered on Cluster at {f_center_cluster/1e9:.2f} GHz")
-ax2.set_xlabel("Offset from Cluster Center (MHz)")
-ax2.set_ylabel("Intensity")
-st.pyplot(fig2)
+# --- Calculated Physics Outputs ---
+st.write("---")
+st.subheader("Optical Properties at Target Wavelength")
+c1, c2, c3 = st.columns(3)
 
-# --- Info Display ---
-st.info(f"**Calculated FSR (Signal):** {fsr_y/1e6:.2f} MHz | **Cluster Spacing:** ~{abs(fsr_y**2/(fsr_y - (c/(2*(L_air + n_ktp(lambda0, 'z')*L_cry)))))/1e9:.1f} GHz")
+with c1:
+    st.metric("Refractive Index (Signal - Y)", f"{ny0:.5f}")
+    st.metric("Refractive Index (Idler - Z)", f"{nz0:.5f}")
+
+with c2:
+    st.metric("FSR (Signal - Y)", f"{fsr_y/1e6:.2f} MHz")
+    st.metric("FSR (Idler - Z)", f"{fsr_z/1e6:.2f} MHz")
+
+with c3:
+    cluster_spacing = abs(fsr_y * fsr_z / (fsr_y - fsr_z))
+    st.metric("Mode Delta (ΔFSR)", f"{abs(fsr_y - fsr_z)/1e6:.2f} MHz")
+    st.metric("Expected Cluster Spacing", f"{cluster_spacing/1e9:.2f} GHz")
+
+st.info(f"The interaction is Type-II: Signal is Y-polarized, Idler is Z-polarized. Difference in $n$ results in the Vernier effect.")
