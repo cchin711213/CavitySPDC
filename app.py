@@ -63,26 +63,3 @@ gvm = 0.5 * (1/vg_s + 1/vg_i) - 1/vg_p
 
 def get_spectrum(f_detuning):
     fs = f0 + f_detuning
-    fi = f0 - f_detuning
-    # Sinc Envelope
-    arg = L_cry * gvm * f_detuning
-    sinc_sq = np.sinc(arg)**2 
-    
-    def airy(f, axis):
-        n = n_ktp(c_const / f, axis=axis)
-        # Fix: Ensure parentheses are balanced and L_opt is recalculated for freq
-        phi = (2 * np.pi * f / c_const) * (2 * (L_air + n * L_cry))
-        coeff = (2 * finesse / np.pi)**2
-        return 1 / (1 + coeff * np.sin(phi / 2)**2)
-
-    val = sinc_sq * airy(fs, 'y') * airy(fi, 'z')
-    return val, sinc_sq
-
-# --- Data Generation ---
-f_wide = np.linspace(-400e9, 400e9, 200000)
-p_wide, sinc_wide = get_spectrum(f_wide)
-
-# Cluster Identification
-peaks, _ = find_peaks(p_wide, distance=2000, height=0.005)
-cluster_freqs = f_wide[peaks]
-f
