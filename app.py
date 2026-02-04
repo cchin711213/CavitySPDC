@@ -32,7 +32,7 @@ L_cry_cm = st.sidebar.slider("Crystal Length (cm)", 0.5, 2.0, 1.0, step=0.1)
 finesse = st.sidebar.slider("Cavity Finesse", 10, 500, 100)
 
 st.sidebar.header("Plotting Controls")
-micro_range_mhz = st.sidebar.slider("Micro View Range (± MHz)", 100, 5000, 1000)
+micro_range_mhz = st.sidebar.slider("Micro View Range (± MHz)", 100, 25000, 2000)
 
 st.sidebar.header("Fine Tuning")
 lambda_base = 852.354 
